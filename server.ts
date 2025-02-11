@@ -64,7 +64,7 @@ app.post("/login", async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: "Username and password required" });
 
-  const user = await User.findOne({ username });
+  const user = await User.findOne({ username }).lean();
   if (!user || !(await bcrypt.compare(password, user.password)))
     return res.status(401).json({ error: "Invalid credentials" });
 
