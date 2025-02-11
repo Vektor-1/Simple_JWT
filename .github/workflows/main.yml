@@ -1,0 +1,32 @@
+name: Bun Project Workflow
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Bun
+      run: |
+        curl https://bun.sh/install | bash
+        export BUN_BIN="/home/runner/.bun/bin"
+        export PATH="$BUN_BIN:$PATH"
+
+    - name: Install dependencies
+      run: bun install
+
+    - name: Run tests
+      run: bun test
+
+    - name: Build project
+      run: bun build
