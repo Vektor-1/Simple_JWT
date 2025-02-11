@@ -171,6 +171,16 @@ app.get("/profile", async (req, res) => {
   }
 });
 
+app.get("/users", async (req, res) => {
+  try {
+    const users = await User.find({});
+    console.log("All Users:", users);
+    res.json(users);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+});
+
 // Logout
 app.post("/logout", async (req, res) => {
   const token = req.headers.authorization?.split(" ")[1];
