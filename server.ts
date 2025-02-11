@@ -5,11 +5,20 @@ import { createClient } from "redis";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import cors from "cors";
+import ratelimit from "express-rate-limit";
+import crypto from "crypto";
 
-// Setup Express app
 const app = express();
 app.use(express.json());
-app.use(cors()); // Enable CORS
+app.use(cors());
+
+// Rate Limit
+const limiter = ratelimit({
+    windowMs: 15 * 60 * 1000, 
+    max: 100, 
+    message: "Too many requests from this IP, please try again later.",
+});
+app.use(limiter);
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URI!)
@@ -18,8 +27,9 @@ mongoose.connect(process.env.MONGO_URI!)
 
 // User Schema
 const userSchema = new mongoose.Schema({
-  username: String,
-  password: String
+  username: { type: String, unique: true, required: true },
+  password: { type: String, required: true },
+  verified: { type: Boolean, default: false }
 });
 const User = mongoose.model("User", userSchema);
 
@@ -32,18 +42,19 @@ const redisClient = createClient({
 });
 redisClient.connect();
 
-// Generate JWT Token
-const generateToken = (userId: string) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET!, { expiresIn: "1h" });
-};
+// Generate Tokens
+const generateToken = (userId: string) => jwt.sign({ userId }, process.env.JWT_SECRET!, { expiresIn: "1h" });
+const generateRefreshToken = (userId: string) => jwt.sign({ userId }, process.env.JWT_SECRET!, { expiresIn: "7d" });
 
 // Register User
 app.post("/register", async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: "Username and password required" });
 
-  const hashedPassword = await bcrypt.hash(password, 10);
+  const hashedPassword = await bcrypt.hash(password, 12);
   const newUser = await User.create({ username, password: hashedPassword });
+
+  await User.updateOne({ _id: newUser._id }, { verified: true });
 
   res.json({ message: "User registered", userId: newUser._id });
 });
@@ -58,9 +69,20 @@ app.post("/login", async (req, res) => {
     return res.status(401).json({ error: "Invalid credentials" });
 
   const token = generateToken(user._id.toString());
+  const refreshToken = generateRefreshToken(user._id.toString());
 
-  // Store token in Redis
-  await redisClient.setEx(`auth:${user._id}`, 3600, token); // 1 hour expiry
+  // Store session in Redis
+  const sessionId = crypto.randomUUID();
+  await redisClient.setEx(`session:${user._id}`, 3600, sessionId); 
+
+  // Store refresh token
+  await redisClient.setEx(`refreshToken:${user._id}`, 604800, refreshToken);
+
+  res.cookie("refreshToken", refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+  });
 
   res.json({ message: "Login successful", token });
 });
@@ -73,11 +95,11 @@ app.get("/profile", async (req, res) => {
   try {
     const decoded: any = jwt.verify(token, process.env.JWT_SECRET!);
     
-    // Check Redis for valid token
-    const redisToken = await redisClient.get(`auth:${decoded.userId}`);
-    if (!redisToken) return res.status(401).json({ error: "Session expired, login again" });
+    // Check Redis session
+    const redisSession = await redisClient.get(`session:${decoded.userId}`);
+    if (!redisSession) return res.status(401).json({ error: "Session expired, login again" });
 
-    const user = await User.findById(decoded.userId);
+    const user = await User.findById(decoded.userId).lean();
     res.json({ username: user?.username });
   } catch (err) {
     res.status(401).json({ error: "Invalid token" });
@@ -92,8 +114,9 @@ app.post("/logout", async (req, res) => {
   try {
     const decoded: any = jwt.verify(token, process.env.JWT_SECRET!);
     
-    // Remove session from Redis
-    await redisClient.del(`auth:${decoded.userId}`);
+    // Remove session & refresh token from Redis
+    await redisClient.del(`session:${decoded.userId}`);
+    await redisClient.del(`refreshToken:${decoded.userId}`);
 
     res.json({ message: "Logged out successfully" });
   } catch (err) {
